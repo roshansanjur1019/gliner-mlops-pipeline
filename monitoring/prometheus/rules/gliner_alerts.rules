@@ -1,0 +1,149 @@
+groups:
+- name: gliner-api-alerts
+  rules:
+  - alert: HighRequestLatency
+    expr: avg(rate(http_request_duration_seconds_sum[5m]) / rate(http_request_duration_seconds_count[5m])) > 0.5
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High request latency on {{ $labels.instance }}"
+      description: "API instance {{ $labels.instance }} has a request latency of {{ $value }} seconds, which is above the threshold of 0.5s."
+      runbook_url: "https://wiki.example.com/runbooks/high-latency-troubleshooting"
+
+  - alert: HighErrorRate
+    expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+    for: 3m
+    labels:
+      severity: critical
+      team: mlops
+    annotations:
+      summary: "High error rate on {{ $labels.instance }}"
+      description: "API instance {{ $labels.instance }} has a 5xx error rate of {{ $value | humanizePercentage }}, which is above the threshold of 5%."
+      runbook_url: "https://wiki.example.com/runbooks/error-rate-troubleshooting"
+
+  - alert: ServiceDown
+    expr: up{job="gliner-api"} == 0
+    for: 1m
+    labels:
+      severity: critical
+      team: mlops
+    annotations:
+      summary: "Service down on {{ $labels.instance }}"
+      description: "API instance {{ $labels.instance }} is down."
+      runbook_url: "https://wiki.example.com/runbooks/service-down-troubleshooting"
+
+  - alert: HighModelInferenceTime
+    expr: histogram_quantile(0.95, sum(rate(model_inference_seconds_bucket[5m])) by (le)) > 1
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High model inference time"
+      description: "Model inference p95 latency is {{ $value }} seconds, which is above the threshold of 1s."
+      runbook_url: "https://wiki.example.com/runbooks/high-inference-time"
+
+  - alert: HighMemoryUsage
+    expr: (container_memory_usage_bytes{container_name="gliner-api"} / container_spec_memory_limit_bytes{container_name="gliner-api"}) > 0.85
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High memory usage on {{ $labels.instance }}"
+      description: "Container {{ $labels.container_name }} on {{ $labels.instance }} is using {{ $value | humanizePercentage }} of its memory limit."
+      runbook_url: "https://wiki.example.com/runbooks/high-memory-usage"
+
+  - alert: HighCpuUsage
+    expr: (sum(rate(container_cpu_usage_seconds_total{container_name="gliner-api"}[3m])) / sum(container_spec_cpu_quota{container_name="gliner-api"} / 100000)) > 0.85
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High CPU usage on {{ $labels.instance }}"
+      description: "Container {{ $labels.container_name }} on {{ $labels.instance }} is using {{ $value | humanizePercentage }} of its CPU limit."
+      runbook_url: "https://wiki.example.com/runbooks/high-cpu-usage"
+
+- name: model-specific-alerts
+  rules:
+  - alert: ModelPredictionFailures
+    expr: increase(model_predictions_failures_total[15m]) > 10
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Increased model prediction failures"
+      description: "There have been {{ $value }} model prediction failures in the last 15 minutes."
+      runbook_url: "https://wiki.example.com/runbooks/model-prediction-failures"
+
+  - alert: ModelLoadingFailure
+    expr: increase(model_loading_failures_total[15m]) > 0
+    for: 5m
+    labels:
+      severity: critical
+      team: mlops
+    annotations:
+      summary: "Model loading failures detected"
+      description: "The GLiNER model failed to load {{ $value }} times in the last 15 minutes."
+      runbook_url: "https://wiki.example.com/runbooks/model-loading-failures"
+
+  - alert: HighModelLoadingTime
+    expr: model_loading_seconds > 60
+    for: 5m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Model loading time too high"
+      description: "The GLiNER model took {{ $value }} seconds to load, which is above the threshold of 60s."
+      runbook_url: "https://wiki.example.com/runbooks/high-model-loading-time"
+
+  - alert: ModelCacheMiss
+    expr: rate(model_cache_misses_total[5m]) / rate(model_cache_requests_total[5m]) > 0.1
+    for: 15m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "High model cache miss rate"
+      description: "The model cache miss rate is {{ $value | humanizePercentage }}, which is above the threshold of 10%."
+      runbook_url: "https://wiki.example.com/runbooks/model-cache-performance"
+
+- name: infrastructure-alerts
+  rules:
+  - alert: NodeDiskRunningFull
+    expr: (node_filesystem_avail_bytes{mountpoint="/"}  * 100) / node_filesystem_size_bytes{mountpoint="/"} < 10
+    for: 5m
+    labels:
+      severity: warning
+      team: infra
+    annotations:
+      summary: "Node disk running full on {{ $labels.instance }}"
+      description: "Node disk is filling up (< 10% left) on {{ $labels.instance }}."
+      runbook_url: "https://wiki.example.com/runbooks/node-disk-full"
+
+  - alert: KubernetesPodCrashLooping
+    expr: increase(kube_pod_container_status_restarts_total{namespace="mlops", pod=~"gliner-api.*"}[1h]) > 3
+    for: 15m
+    labels:
+      severity: warning
+      team: mlops
+    annotations:
+      summary: "Kubernetes pod crash looping"
+      description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} was restarted {{ $value }} times within the last hour."
+      runbook_url: "https://wiki.example.com/runbooks/pod-crash-looping"
+
+  - alert: KubernetesPodNotReady
+    expr: sum by (namespace, pod) (kube_pod_status_phase{namespace="mlops", pod=~"gliner-api.*", phase=~"Pending|Unknown"}) > 0
+    for: 15m
+    labels:
+      severity: critical
+      team: mlops
+    annotations:
+      summary: "Kubernetes pod not ready"
+      description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been in a non-ready state for more than 15 minutes."
+      runbook_url: "https://wiki.example.com/runbooks/pod-not-ready"

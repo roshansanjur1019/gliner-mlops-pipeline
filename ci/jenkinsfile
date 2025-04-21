@@ -1,0 +1,266 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: python
+    image: python:3.10-slim
+    command:
+    - cat
+    tty: true
+  - name: docker
+    image: docker:20.10.16-dind
+    command:
+    - cat
+    tty: true
+    privileged: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: kubectl
+    image: bitnami/kubectl:latest
+    command:
+    - cat
+    tty: true
+  - name: aws
+    image: amazon/aws-cli:latest
+    command:
+    - cat
+    tty: true
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+'''
+        }
+    }
+    
+    environment {
+        ECR_REPOSITORY_URI = credentials('ecr_repository_uri')
+        AWS_REGION = credentials('aws_region')
+        KUBE_CONFIG = credentials('kube_config')
+        NAMESPACE = 'mlops'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                container('python') {
+                    sh '''
+                    python -m pip install --upgrade pip
+                    pip install -r requirements.txt
+                    pip install pytest pytest-cov
+                    '''
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                container('python') {
+                    sh '''
+                    mkdir -p test-results
+                    python -m pytest tests/ --cov=app --cov-report=xml:test-results/coverage.xml --junitxml=test-results/junit.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'test-results/*.xml'
+                    publishCoverage adapters: [cobertura('test-results/coverage.xml')]
+                }
+            }
+        }
+        
+        stage('Static Code Analysis') {
+            steps {
+                container('python') {
+                    sh '''
+                    pip install pylint
+                    pylint --exit-zero --output-format=parseable app > pylint-report.txt
+                    '''
+                }
+            }
+            post {
+                always {
+                    recordIssues enabledForFailure: true, tool: pyLint(pattern: 'pylint-report.txt')
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                container('python') {
+                    sh '''
+                    pip install bandit
+                    bandit -r app -f json -o bandit-report.json
+                    '''
+                }
+            }
+            post {
+                always {
+                    recordIssues enabledForFailure: true, tool: bandit(pattern: 'bandit-report.json')
+                }
+            }
+        }
+        
+        stage('Build and Push Docker Image') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'staging'
+                    branch 'develop'
+                }
+            }
+            steps {
+                container('docker') {
+                    script {
+                        def branchName = env.BRANCH_NAME
+                        def imageTag = "${branchName}-${env.BUILD_NUMBER}"
+                        
+                        // For main branch, also tag as latest
+                        if (branchName == 'main') {
+                            imageTag = "${imageTag},latest"
+                        }
+                        
+                        // Login to ECR
+                        sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}
+                        '''
+                        
+                        // Build and push Docker image
+                        sh """
+                        docker build -t ${ECR_REPOSITORY_URI}/gliner-api:${imageTag} .
+                        docker push ${ECR_REPOSITORY_URI}/gliner-api:${imageTag}
+                        """
+                        
+                        // Save the image tag for later use
+                        env.IMAGE_TAG = imageTag
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Dev') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                        mkdir -p ~/.kube
+                        cat ${KUBE_CONFIG} > ~/.kube/config
+                        chmod 600 ~/.kube/config
+                        
+                        # Update Kubernetes manifests with correct image tag
+                        sed -i "s|\\${ECR_REPOSITORY_URI}/gliner-api:\\${IMAGE_TAG}|${ECR_REPOSITORY_URI}/gliner-api:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        # Apply Kubernetes manifests
+                        kubectl apply -f k8s/configmap.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/deployment.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/service.yaml -n ${NAMESPACE}
+                        
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/gliner-api -n ${NAMESPACE} --timeout=180s
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            when {
+                branch 'staging'
+            }
+            steps {
+                container('kubectl') {
+                    script {
+                        sh '''
+                        mkdir -p ~/.kube
+                        cat ${KUBE_CONFIG} > ~/.kube/config
+                        chmod 600 ~/.kube/config
+                        
+                        # Update Kubernetes manifests with correct image tag
+                        sed -i "s|\\${ECR_REPOSITORY_URI}/gliner-api:\\${IMAGE_TAG}|${ECR_REPOSITORY_URI}/gliner-api:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        # Apply Kubernetes manifests
+                        kubectl apply -f k8s/configmap.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/deployment.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/service.yaml -n ${NAMESPACE}
+                        
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/gliner-api -n ${NAMESPACE} --timeout=180s
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                // Manual approval for production deployment
+                timeout(time: 24, unit: 'HOURS') {
+                    input message: 'Approve deployment to Production?', ok: 'Deploy'
+                }
+                
+                container('kubectl') {
+                    script {
+                        sh '''
+                        mkdir -p ~/.kube
+                        cat ${KUBE_CONFIG} > ~/.kube/config
+                        chmod 600 ~/.kube/config
+                        
+                        # Update Kubernetes manifests with correct image tag
+                        sed -i "s|\\${ECR_REPOSITORY_URI}/gliner-api:\\${IMAGE_TAG}|${ECR_REPOSITORY_URI}/gliner-api:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        
+                        # Create namespace if it doesn't exist
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        # Apply Kubernetes manifests
+                        kubectl apply -f k8s/configmap.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/deployment.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/service.yaml -n ${NAMESPACE}
+                        
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/gliner-api -n ${NAMESPACE} --timeout=180s
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+            // Additional success notifications (Slack, email, etc.)
+        }
+        failure {
+            echo 'Pipeline failed!'
+            // Additional failure notifications
+        }
+        always {
+            // Clean up workspace
+            cleanWs()
+        }
+    }
+}

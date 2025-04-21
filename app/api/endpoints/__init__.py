@@ -1,0 +1,1 @@
+"""API endpoints for the GLiNER NER Model."""

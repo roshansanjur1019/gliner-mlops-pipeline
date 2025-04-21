@@ -1,0 +1,70 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gliner-api-hpa
+  namespace: ${NAMESPACE}
+  labels:
+    app: gliner-api
+    environment: ${ENVIRONMENT}
+  annotations:
+    description: "HorizontalPodAutoscaler for GLiNER API"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gliner-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  # Custom metrics for more advanced scaling
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: 100
+  # External metric example for cloud provider metrics
+  - type: External
+    external:
+      metric:
+        name: sqs_messages_visible
+        selector:
+          matchLabels:
+            queue-name: gliner-prediction-queue
+      target:
+        type: AverageValue
+        averageValue: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+      - type: Pods
+        value: 4
+        periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 300
+      - type: Pods
+        value: 2
+        periodSeconds: 300
+      selectPolicy: Min

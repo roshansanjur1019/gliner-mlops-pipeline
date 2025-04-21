@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gliner-api
+  namespace: mlops
+  labels:
+    app: gliner-api
+    component: prediction-service
+    tier: backend
+    version: v1
+  annotations:
+    description: "GLiNER NER Model API Deployment"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gliner-api
+  template:
+    metadata:
+      labels:
+        app: gliner-api
+        component: prediction-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: gliner-api
+        image: ${ECR_REPOSITORY_URI}/gliner-api:${IMAGE_TAG}
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: gliner-config
+              key: MODEL_NAME
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: gliner-config
+              key: LOG_LEVEL
+        - name: API_KEY_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: gliner-config
+              key: API_KEY_ENABLED
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gliner-secrets
+              key: API_KEY
+        - name: MODEL_CACHE_DIR
+          value: "/app/cache"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /app/cache
+        - name: log-volume
+          mountPath: /app/logs
+        - name: tmp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12
+      volumes:
+      - name: cache-volume
+        emptyDir: {}
+      - name: log-volume
+        emptyDir: {}
+      - name: tmp-volume
+        emptyDir: {}
+      terminationGracePeriodSeconds: 60
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - gliner-api
+              topologyKey: "kubernetes.io/hostname"
+      nodeSelector:
+        accelerator: gpu
